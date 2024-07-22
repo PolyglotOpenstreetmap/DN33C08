@@ -13,7 +13,6 @@ class SimpleQueue:
 
     async def put(self, item):
         if item is None:
-            print("Attempted to put None in queue, ignoring...")
             return
         self.queue.append(item)
         self._event.set()
@@ -49,8 +48,6 @@ class DN33C08:
         Settings.load_settings()
         self.relay_config = Settings.relays
         self.input_config = Settings.inputs
-        print(Settings.inputs)
-        print(Settings.relays)
 
     def _init_relays(self):
         relay_pins = [13, 12, 28, 27, 26, 19, 17, 16]
@@ -91,10 +88,8 @@ class DN33C08:
             try:
                 item = await self.input_queue.get()
                 if item is None:
-                    print("Received None from input queue, skipping...")
                     continue
                 if not isinstance(item, tuple) or len(item) != 2:
-                    print(f"Received unexpected item from queue: {item}")
                     continue
                 action, input_id = item
                 if action == 'activate':
@@ -105,11 +100,11 @@ class DN33C08:
                     print(f"Unknown action: {action}")
             except Exception as e:
                 print(f"Error in process_input_queue: {e}")
+                print(f"Error occurred while processing item: {item}")
                 # Optionally, add a small delay to prevent tight looping in case of persistent errors
-                await uasyncio.sleep_ms(100)
+                await uasyncio.sleep_ms(200)
 
-
-    def handle_input_activation(self, input_id):
+    async def handle_input_activation(self, input_id):
         if input_id in self.input_output_mappings:
             mapping = self.input_output_mappings[input_id]
             output_id = mapping['output']
@@ -138,25 +133,31 @@ class DN33C08:
                 self.switch_relay(output_id, duration)
                 mapping['active'] = True
             
-            elif behavior == 'On_while_pressed':
+            elif behavior == 'On_while_activated':
                 self.relays[output_id].value(1)
                 mapping['active'] = True
 
-            # Call any registered callbacks for this input
+        if self.input_callbacks.get(input_id, []):
             for callback in self.input_callbacks.get(input_id, []):
-                callback(input_id)
+                try:
+                    callback(input_id)
+                except Exception as e:
+                    print(f"Error in activation callback for input {input_id}: {e}")
 
-    def handle_input_deactivation(self, input_id):
+    async def handle_input_deactivation(self, input_id):
         if input_id in self.input_output_mappings:
             mapping = self.input_output_mappings[input_id]
-            if mapping['behavior'] == 'On_while_pressed':
+            if mapping['behavior'] == 'On_while_activated':
                 output_id = mapping['output']
                 self.relays[output_id].value(0)
                 mapping['active'] = False
 
-            # Call any registered callbacks for this input
+        if self.input_callbacks.get(input_id, []):
             for callback in self.input_callbacks.get(input_id, []):
-                callback(input_id)
+                try:
+                    callback(input_id)
+                except Exception as e:
+                    print(f"Error in deactivation callback for input {input_id}: {e}")
 
     def _init_buttons(self):
         button_pins = [18, 20, 21, 22]
@@ -166,15 +167,6 @@ class DN33C08:
             button.irq(trigger=Pin.IRQ_FALLING, handler=self._button_handler)
             buttons.append(button)
         return buttons
-
-    def _input_handler(self, pin):
-        for input_id, input_pin in self.inputs.items():
-            if input_pin is pin:
-                if pin.value() == 0:  # Input activated (assuming active low)
-                    self.handle_input_activation(input_id)
-                else:
-                    self.handle_input_deactivation(input_id)
-                break
 
     def _button_handler(self, pin):
         for i, button in enumerate(self.buttons):
@@ -196,7 +188,6 @@ class DN33C08:
         raise ValueError(f"No relay found with name: {name}")
 
     def register_input_output_mapping(self, input_id, output_id, behavior, duration=None):
-        print(input_id, output_id, behavior)
         self.input_output_mappings[input_id] = {
             'output': output_id,
             'behavior': behavior,
@@ -268,16 +259,25 @@ class DN33C08:
     
 async def main():
     dn33c08 = DN33C08()
-    print(dn33c08.generate_relay_json())
+    io_task = uasyncio.create_task(dn33c08.process_input_queue())
+    
+    # Add other tasks here if needed, for example:
+    # display_task = uasyncio.create_task(dn33c08.update_display())
+    
     try:
-        input_queue_task = uasyncio.create_task(dn33c08.process_input_queue())
-        # Your other tasks here...
-        await uasyncio.gather(input_queue_task, other_task1, other_task2)
-    except Exception as e:
-        print(f"Error in main: {e}")
-
-    while True:
-        await uasyncio.sleep(1)
+        while True:
+            # This keeps the main coroutine running
+            # You can add periodic checks or other operations here
+            await uasyncio.sleep(1)
+    except KeyboardInterrupt:
+        print("Program interrupted")
+    finally:
+        # Clean up tasks if needed
+        io_task.cancel()
+        # Cancel other tasks here if you've added them
+        await io_task
+        # Await other cancelled tasks here
 
 if __name__ == "__main__":
     uasyncio.run(main())
+
