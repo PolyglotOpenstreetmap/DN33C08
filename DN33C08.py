@@ -3,27 +3,7 @@ import time
 from machine import Pin, Timer
 from Settings import Settings
 from LED_8SEG import LED_8SEG
-import ujson
-from collections import deque
-
-class SimpleQueue:
-    def __init__(self, maxsize=20):
-        self.queue = deque((), maxsize)
-        self._event = uasyncio.Event()
-
-    async def put(self, item):
-        if item is None:
-            print("Attempted to put None in queue, ignoring...")
-            return
-        self.queue.append(item)
-        self._event.set()
-
-    async def get(self):
-        while not self.queue:
-            self._event.clear()
-            await self._event.wait()
-        return self.queue.popleft()
-
+from queue import Queue
 
 class DN33C08:
     def __init__(self):
@@ -31,7 +11,7 @@ class DN33C08:
         self.update_settings()
         self.last_press_time = {}
         self.last_release_time = {}
-        self.input_queue = SimpleQueue(20)
+        self.input_queue = Queue(maxsize=20)
         self.inputs = self._init_inputs()
         self.led_external = Pin(25, Pin.OUT)
         self.relays = self._init_relays()
@@ -49,8 +29,6 @@ class DN33C08:
         Settings.load_settings()
         self.relay_config = Settings.relays
         self.input_config = Settings.inputs
-        print(Settings.inputs)
-        print(Settings.relays)
 
     def _init_relays(self):
         relay_pins = [13, 12, 28, 27, 26, 19, 17, 16]
@@ -69,6 +47,7 @@ class DN33C08:
         return inputs
 
     def handle_interrupt(self, pin, input_id):
+        print(f"Interrupt triggered for input {input_id}")
         if pin.value() == 0:  # Falling edge (button pressed)
             self.handle_pressed_interrupt(pin, input_id)
         else:  # Rising edge (button released)
@@ -76,8 +55,10 @@ class DN33C08:
 
     def handle_pressed_interrupt(self, pin, input_id):
         current_time = time.ticks_ms()
+        print(current_time - self.last_press_time[input_id], self.debounce, (current_time - self.last_press_time[input_id]) > self.debounce)
         if (current_time - self.last_press_time[input_id]) > self.debounce:
             self.last_press_time[input_id] = current_time
+            print(f'putting activate on the queue for {input_id}')
             uasyncio.create_task(self.input_queue.put(('activate', input_id)))
 
     def handle_released_interrupt(self, pin, input_id):
@@ -87,14 +68,14 @@ class DN33C08:
             uasyncio.create_task(self.input_queue.put(('deactivate', input_id)))
 
     async def process_input_queue(self):
+        print('starting processing input queue')
         while True:
             try:
+                print('in process input queue')
                 item = await self.input_queue.get()
                 if item is None:
-                    print("Received None from input queue, skipping...")
                     continue
                 if not isinstance(item, tuple) or len(item) != 2:
-                    print(f"Received unexpected item from queue: {item}")
                     continue
                 action, input_id = item
                 if action == 'activate':
@@ -105,11 +86,11 @@ class DN33C08:
                     print(f"Unknown action: {action}")
             except Exception as e:
                 print(f"Error in process_input_queue: {e}")
-                # Optionally, add a small delay to prevent tight looping in case of persistent errors
-                await uasyncio.sleep_ms(100)
+                print(f"Error occurred while processing item: {item}")
+                await uasyncio.sleep_ms(200)
 
 
-    def handle_input_activation(self, input_id):
+    async def handle_input_activation(self, input_id):
         if input_id in self.input_output_mappings:
             mapping = self.input_output_mappings[input_id]
             output_id = mapping['output']
@@ -125,9 +106,14 @@ class DN33C08:
             
             elif behavior == 'Timed':
                 if not mapping['active']:
-                    self.switch_relay(output_id, duration)
+                    # If not active, turn on and start timer
+                    self.relays[output_id].value(1)
+                    if output_id in self.timers:
+                        self.timers[output_id].deinit()
+                    self.timers[output_id] = Timer(mode=Timer.ONE_SHOT, period=duration, callback=lambda t: self._timer_callback(output_id))
                     mapping['active'] = True
                 else:
+                    # If already active, turn off and cancel timer
                     self.relays[output_id].value(0)
                     if output_id in self.timers:
                         self.timers[output_id].deinit()
@@ -135,28 +121,38 @@ class DN33C08:
                     mapping['active'] = False
             
             elif behavior == 'Timer_resets':
-                self.switch_relay(output_id, duration)
+                self.relays[output_id].value(1)  # Turn on the relay
+                if output_id in self.timers:
+                    self.timers[output_id].deinit()
+                self.timers[output_id] = Timer(mode=Timer.ONE_SHOT, period=duration, callback=lambda t: self._timer_callback(output_id))
                 mapping['active'] = True
             
-            elif behavior == 'On_while_pressed':
-                self.relays[output_id].value(1)
+            elif behavior == 'On_while_activated':
+                self.relays[output_id].value(1)  # Turn on the relay
                 mapping['active'] = True
 
-            # Call any registered callbacks for this input
-            for callback in self.input_callbacks.get(input_id, []):
-                callback(input_id)
+            if self.input_callbacks.get(input_id, []):
+                for callback in self.input_callbacks.get(input_id, []):
+                    try:
+                        callback(input_id)
+                    except Exception as e:
+                        print(f"Error in activation callback for input {input_id}: {e}")
 
-    def handle_input_deactivation(self, input_id):
+
+    async def handle_input_deactivation(self, input_id):
         if input_id in self.input_output_mappings:
             mapping = self.input_output_mappings[input_id]
-            if mapping['behavior'] == 'On_while_pressed':
+            if mapping['behavior'] == 'On_while_activated':
                 output_id = mapping['output']
                 self.relays[output_id].value(0)
                 mapping['active'] = False
 
-            # Call any registered callbacks for this input
+        if self.input_callbacks.get(input_id, []):
             for callback in self.input_callbacks.get(input_id, []):
-                callback(input_id)
+                try:
+                    callback(input_id)
+                except Exception as e:
+                    print(f"Error in deactivation callback for input {input_id}: {e}")
 
     def _init_buttons(self):
         button_pins = [18, 20, 21, 22]
@@ -166,15 +162,6 @@ class DN33C08:
             button.irq(trigger=Pin.IRQ_FALLING, handler=self._button_handler)
             buttons.append(button)
         return buttons
-
-    def _input_handler(self, pin):
-        for input_id, input_pin in self.inputs.items():
-            if input_pin is pin:
-                if pin.value() == 0:  # Input activated (assuming active low)
-                    self.handle_input_activation(input_id)
-                else:
-                    self.handle_input_deactivation(input_id)
-                break
 
     def _button_handler(self, pin):
         for i, button in enumerate(self.buttons):
@@ -186,7 +173,11 @@ class DN33C08:
     def _setup_mappings(self):
         for input_id, config in self.input_config.items():
             relay_name, duration, behavior = config
-            relay_id = self._get_relay_id_by_name(relay_name)
+            try:
+                relay_id = self._get_relay_id_by_name(relay_name)
+            except ValueError:
+                print(f"Warning: No relay found for input {input_id}")
+                continue
             self.register_input_output_mapping(input_id, relay_id, behavior, duration)
 
     def _get_relay_id_by_name(self, name):
@@ -196,7 +187,6 @@ class DN33C08:
         raise ValueError(f"No relay found with name: {name}")
 
     def register_input_output_mapping(self, input_id, output_id, behavior, duration=None):
-        print(input_id, output_id, behavior)
         self.input_output_mappings[input_id] = {
             'output': output_id,
             'behavior': behavior,
@@ -205,30 +195,77 @@ class DN33C08:
             'timer_task': None
         }
 
-    def switch_relay(self, relay_id, duration_ms):
-        if isinstance(relay_id, str):
-            relay_id = self._get_relay_id_by_name(relay_id)
-        if relay_id in self.relays:
-            self.relays[relay_id].value(1)  # Turn on the relay
-            
-            # Cancel existing timer if there is one
-            if relay_id in self.timers:
-                self.timers[relay_id].deinit()
-            
-            # Create a new timer
-            timer = Timer()
-            timer.init(mode=Timer.ONE_SHOT, period=duration_ms, callback=lambda t: self._timer_callback(relay_id))
-            self.timers[relay_id] = timer
-        else:
-            raise ValueError("Invalid relay ID")
+    def switch_relay(self, relay_num, delay):
+        # Implement relay switching logic here, including delay handling
+        self.relay_states[relay_num] = 1 - self.relay_states[relay_num]
+        print(f'Relay {relay_num+1} switched to {"ON" if self.relay_states[relay_num] else "OFF"}')
 
-    def _timer_callback(self, relay_id):
-        self.relays[relay_id].value(0)  # Turn off the relay
-        self.timers.pop(relay_id, None)
+    def set_relay_name(self, relay_num, name):
+        self.relay_names[relay_num] = name
+        
+    @property
+    def relay_states(self):
+        print("Accessing relay_states property")
+        return [relay.value() for relay in self.relays.values()]
+
+    @property
+    def _relay_names(self):
+        _relay_names = []
+        for relay_id, relay_name in self.relay_config.items():
+            _relay_names.append(relay_name)
+        return _relay_names
+
+    @property
+    def relay_names(self):
+        return self._relay_names
+
+    def get_relay_state(self, relay_num):
+        print(f"Getting state for relay {relay_num}")
+        return self.relays[relay_num].value()
+
+    def get_input_info(self, input_id):
+        if input_id in self.input_output_mappings:
+            mapping = self.input_output_mappings[input_id]
+            output_id = mapping['output']
+            return {
+                'relay_name': self.relay_names[output_id - 1],
+                'behavior': mapping['behavior'],
+                'duration': mapping['duration'],
+                'active': mapping['active']
+            }
+        return None
+
+    def generate_relay_json(self):
+        print("Entering generate_relay_json")
+        result = {}
+        for i in range(1, 9):
+            print(f"Processing relay {i}")
+            relay_info = {
+                'name': self.relay_names[i-1],
+                'state': self.get_relay_state(i),
+                'inputs': []
+            }
+            for input_id, mapping in self.input_output_mappings.items():
+                if mapping['output'] == i:
+                    input_info = self.get_input_info(input_id)
+                    if input_info:
+                        relay_info['inputs'].append({
+                            'input_id': input_id,
+                            'behavior': input_info['behavior'],
+                            'duration': input_info['duration'],
+                            'active': input_info['active']
+                        })
+            result[f'relay{i}'] = relay_info
+        return result
+
+    def _timer_callback(self, output_id):
+        self.relays[output_id].value(0)  # Turn off the relay
+        if output_id in self.timers:
+            self.timers[output_id].deinit()
+            self.timers.pop(output_id)
         for mapping in self.input_output_mappings.values():
-            if mapping['output'] == relay_id:
+            if mapping['output'] == output_id:
                 mapping['active'] = False
-                mapping['timer_task'] = None
 
     def get_timer_remaining(self, relay_id):
         if relay_id in self.timers:
@@ -247,37 +284,47 @@ class DN33C08:
             self.button_callbacks[_button_id].append(callback)
         else:
             raise ValueError("Invalid button ID")
-
-    @property
-    def relay_states(self):
-        self._relay_states = [(i, relay.value()) for i, relay in self.relays.items()]
-        return self._relay_states
-
-    def generate_relay_json(self):
-        relay_data = {}
-        for relay_id, relay in self.relays.items():
-            relay_name = self.relay_config.get(relay_id, f"Relay {relay_id}")
-            state = relay.value()
-            remaining = self.get_timer_remaining(relay_id)
-            relay_data[f"relay{relay_id}"] = {
-                "state": int(state),
-                "name": relay_name,
-                "remaining": remaining
-            }
-        return ujson.dumps(relay_data)
     
 async def main():
     dn33c08 = DN33C08()
-    print(dn33c08.generate_relay_json())
-    try:
-        input_queue_task = uasyncio.create_task(dn33c08.process_input_queue())
-        # Your other tasks here...
-        await uasyncio.gather(input_queue_task, other_task1, other_task2)
-    except Exception as e:
-        print(f"Error in main: {e}")
+    io_task = uasyncio.create_task(dn33c08.process_input_queue())
 
-    while True:
-        await uasyncio.sleep(1)
+    if True:
+        print(Settings.relays)
+        print(Settings.inputs)
+        print(Settings.ip)
+        print(Settings.subnet_mask)
+        print(Settings.gateway)
+        print(Settings.dns_server)
+        print(Settings.mqtt_broker)
+        print(Settings.mqtt_topic_prefix)
+     
+        print(dn33c08._init_relays())
+        print(dn33c08._init_inputs())
+        print(dn33c08._init_buttons())
+        dn33c08.set_relay_name(7, 'WC')
+        #print(dn33c08._get_relay_id_by_name('WC'))
+        print(dn33c08._get_relay_id_by_name('Kitchen'))
+ 
+        dn33c08.switch_relay(5, 100000)
+
+        print(dn33c08.relay_states)
+        print(dn33c08.relay_names)
+        print(dn33c08.get_relay_state(3))
+        print(dn33c08.generate_relay_json)
+        print(dn33c08.get_timer_remaining(1))
+
+    async def queue_status():
+        while True:
+            print(f"Queue size: {dn33c08.input_queue.qsize()}")
+            await uasyncio.sleep(5)
+    queue_status_task = uasyncio.create_task(queue_status())
+    try:
+        while True:
+            await uasyncio.sleep(50)  # Sleep for a long time to keep the script running
+    except KeyboardInterrupt:
+        print("Program interrupted")
 
 if __name__ == "__main__":
     uasyncio.run(main())
+
