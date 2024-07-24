@@ -6,12 +6,13 @@
     <style>
         body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f0f0f0; }
         h1 { color: #333; }
-        .relay-row { display: flex; justify-content: space-around; margin-bottom: 20px; }
-        .relay-control { background-color: white; border-radius: 8px; padding: 15px; margin: 0 10px; flex: 1; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .relay-row { display: flex; justify-content: space-around; margin-bottom: 20px; flex-wrap: wrap; }
+        .relay-control { background-color: white; border-radius: 8px; padding: 15px; margin: 10px; flex: 1; min-width: 200px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
         button { width: 80px; height: 80px; border: none; border-radius: 50%; font-size: 16px; margin: 10px 0; cursor: pointer; }
         button.on { background-color: #ff4136; color: white; }
         button.off { background-color: #aaaaaa; color: black; }
         input { width: 80%; margin: 5px 0; }
+        .input-info { font-size: 0.9em; margin-top: 10px; text-align: left; }
     </style>
 </head>
 <body>
@@ -30,8 +31,22 @@
                             button.className = relay.state ? 'on' : 'off';
                             button.textContent = relay.state ? 'ON' : 'OFF';
                         }
+                        let inputInfo = document.getElementById(`relay${i}InputInfo`);
+                        if (inputInfo) {
+                            inputInfo.innerHTML = generateInputInfoHTML(relay.inputs);
+                        }
                     }
                 });
+        }
+
+        function generateInputInfoHTML(inputs) {
+            return inputs.map(input => `
+                <div>
+                    Input ${input.input_id}: ${input.behavior} 
+                    ${input.duration ? `(${input.duration}ms)` : ''}
+                    ${input.active ? '(Active)' : ''}
+                </div>
+            `).join('');
         }
 
         function createRelayControls() {
@@ -43,18 +58,16 @@
                         let relay = data[`relay${i}`];
                         controlsHtml += `
                             <div class="relay-control">
-                                <h3 id="relayName${i}" onclick="editName(${i})">${relay.name}</h3>
-                                <input type="text" id="relayNameInput${i}" style="display:none" onblur="updateName(${i})">
-                                <button onclick="toggleRelay(${i})" id="relay${i}Button" class="${relay.state ? 'on' : 'off'}">
-                                    ${relay.state ? 'ON' : 'OFF'}
-                                </button>
-                                <br>
-                                <label for="relayDelay${i}">Delay (ms):</label>
-                                <input type="number" id="relayDelay${i}" value="${relay.delay}" onchange="updateDelay(${i})">
+                                <h2>
+                                    <span id="relayName${i}" onclick="editName(${i})">${relay.name}</span>
+                                    <input type="text" id="relayNameInput${i}" style="display:none;" onblur="updateName(${i})">
+                                </h2>
+                                <button id="relay${i}Button" class="${relay.state ? 'on' : 'off'}" onclick="toggleRelay(${i})">${relay.state ? 'ON' : 'OFF'}</button>
+                                <div id="relay${i}InputInfo" class="input-info">
+                                    ${generateInputInfoHTML(relay.inputs)}
+                                </div>
                             </div>`;
-                        if (i === 4) {
-                            controlsHtml += '</div><div class="relay-row">';
-                        }
+                        if (i % 4 === 0) controlsHtml += '</div><div class="relay-row">';
                     }
                     controlsHtml += '</div>';
                     document.getElementById('relayControls').innerHTML = controlsHtml;
@@ -62,39 +75,35 @@
         }
 
         function toggleRelay(relayNum) {
+            console.log(`Toggling relay ${relayNum}`);
             fetch(`/toggle_relay${relayNum}`)
-                .then(() => updateRelayStates());
-        }
-
-        function editName(relayNum) {
-            let nameElement = document.getElementById(`relayName${relayNum}`);
-            let inputElement = document.getElementById(`relayNameInput${relayNum}`);
-            nameElement.style.display = 'none';
-            inputElement.style.display = 'inline';
-            inputElement.value = nameElement.innerText;
-            inputElement.focus();
-        }
-
-        function updateName(relayNum) {
-            let nameElement = document.getElementById(`relayName${relayNum}`);
-            let inputElement = document.getElementById(`relayNameInput${relayNum}`);
-            let newName = inputElement.value;
-            fetch(`/update_name${relayNum}?name=${encodeURIComponent(newName)}`)
-                .then(() => {
-                    nameElement.innerText = newName;
-                    nameElement.style.display = 'block';
-                    inputElement.style.display = 'none';
+                .then(response => {
+                    console.log(`Relay ${relayNum} toggled, response status: ${response.status}`);
+                    updateRelayStates();
                 });
         }
 
-        function updateDelay(relayNum) {
-            let delayElement = document.getElementById(`relayDelay${relayNum}`);
-            let newDelay = delayElement.value;
-            fetch(`/update_delay${relayNum}?delay=${newDelay}`);
+        function editName(relayNum) {
+            document.getElementById(`relayName${relayNum}`).style.display = 'none';
+            document.getElementById(`relayNameInput${relayNum}`).style.display = 'block';
+            document.getElementById(`relayNameInput${relayNum}`).value = document.getElementById(`relayName${relayNum}`).textContent;
+            document.getElementById(`relayNameInput${relayNum}`).focus();
+        }
+
+        function updateName(relayNum) {
+            let newName = document.getElementById(`relayNameInput${relayNum}`).value;
+            console.log(`Updating name for relay ${relayNum} to ${newName}`);
+            fetch(`/update_name${relayNum}?name=${newName}`)
+                .then(response => {
+                    console.log(`Relay ${relayNum} name updated, response status: ${response.status}`);
+                    document.getElementById(`relayName${relayNum}`).textContent = newName;
+                    document.getElementById(`relayName${relayNum}`).style.display = 'block';
+                    document.getElementById(`relayNameInput${relayNum}`).style.display = 'none';
+                });
         }
 
         createRelayControls();
-        setInterval(updateRelayStates, 1000);
+        setInterval(updateRelayStates, 5000); // Refresh relay states every 5 seconds
     </script>
 </body>
 </html>
