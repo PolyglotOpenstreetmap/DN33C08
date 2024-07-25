@@ -7,18 +7,17 @@ from queue import Queue
 
 class DN33C08:
     def __init__(self):
+        self.led_external = Pin(25, Pin.OUT)
+        self.led_display = LED_8SEG()
+        self.display_task = None
         self.debounce = 300
         self.update_settings()
         self.last_press_time = {}
         self.last_release_time = {}
         self.input_queue = Queue(maxsize=20)
         self.inputs = self._init_inputs()
-        self.led_external = Pin(25, Pin.OUT)
         self.relays = self._init_relays()
         self.buttons = self._init_buttons()
-        self.led_display = LED_8SEG()
-        self.display_buffer = [0] * 4
-        self.display_task = None
         self.timers = {}
         self.input_output_mappings = {}
         self._setup_mappings()
@@ -284,12 +283,22 @@ class DN33C08:
             self.button_callbacks[_button_id].append(callback)
         else:
             raise ValueError("Invalid button ID")
-    
+
+    def set_display(self, content, dots='    ', duration_ms=0):
+        self.led_display.set_display(content, dots, duration_ms)
+
+    def get_current_display(self):
+        return self.led_display.get_current_display()
+
+    def clear_display(self):
+        self.led_display.clear_and_stop()
+
 async def main():
     dn33c08 = DN33C08()
     io_task = uasyncio.create_task(dn33c08.process_input_queue())
 
     if True:
+        dn33c08.set_display('AD23', ' .  ', 1000)
         print(Settings.relays)
         print(Settings.inputs)
         print(Settings.ip)
@@ -313,6 +322,7 @@ async def main():
         print(dn33c08.get_relay_state(3))
         print(dn33c08.generate_relay_json)
         print(dn33c08.get_timer_remaining(1))
+        dn33c08.set_display('ABC1', '   .', 10000)
 
     async def queue_status():
         while True:
@@ -327,4 +337,3 @@ async def main():
 
 if __name__ == "__main__":
     uasyncio.run(main())
-
