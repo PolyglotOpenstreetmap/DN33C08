@@ -7,7 +7,6 @@ from queue import Queue
 
 class DN33C08:
     def __init__(self):
-        self.led_external = Pin(25, Pin.OUT)
         self.led_display = LED_8SEG()
         self.display_task = None
         self.debounce = 300
@@ -23,6 +22,22 @@ class DN33C08:
         self._setup_mappings()
         self.input_callbacks = {i: [] for i in range(1, 9)}
         self.button_callbacks = {i: [] for i in range(4)}
+        self.external_LED = Pin(25, Pin.OUT)
+        self.timer_LED = Timer()
+        self.blinking_LED = False
+
+    def blink_led(self, frequency):
+        if self.blinking_LED:
+            self.timer_LED.deinit()
+            self.blinking_LED = False
+
+        if frequency == 0:
+            self.led_external.value(0)
+            return
+
+        period_ms = int(1000 / (2 * frequency))
+        self.timer_LED.init(mode=Timer.PERIODIC, period=period_ms, callback=lambda t: self.external_LED.toggle())
+        self.blinking_LED = True
 
     def update_settings(self):
         Settings.load_settings()
@@ -337,3 +352,4 @@ async def main():
 
 if __name__ == "__main__":
     uasyncio.run(main())
+
