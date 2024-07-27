@@ -61,7 +61,7 @@ class LED_8SEG:
                 self.buffer[i] |= self.Dot
 
     def start_refresh(self):
-        self.refresh_timer.init(period=5, mode=Timer.PERIODIC, callback=lambda t: self.update_display())
+        self.refresh_timer.init(period=12, mode=Timer.PERIODIC, callback=lambda t: self.update_display())
 
     def stop_refresh(self):
         self.refresh_timer.deinit()
@@ -77,9 +77,9 @@ class LED_8SEG:
         self.update_display()
 
     def set_display(self, content, dots, duration_ms):
-        self.clear_timer.deinit()  # Cancel any existing clear timer
+        self.clear_timer.deinit()
         self.set_buffer(content, dots)
-        self.start_refresh()  # Start continuous refresh
+        self.start_refresh()
 
         if duration_ms > 0:
             self.clear_timer.init(mode=Timer.ONE_SHOT, period=duration_ms, callback=lambda t: self.clear_and_stop())
