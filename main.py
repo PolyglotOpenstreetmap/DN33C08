@@ -1,7 +1,7 @@
 import uasyncio
 from WifiConnection import WifiConnection
 from DN33C08 import DN33C08
-#from MQTTManager import MQTTManager
+from MQTTManager import MQTTManager
 from Settings import Settings
 import ujson
 
@@ -65,9 +65,9 @@ async def handle_client(reader, writer):
         await writer.wait_closed()
         print('Client Disconnected')
 
-async def run_server():
+async def run_server(wifi):
     while True:
-        if WifiConnection.wlan and WifiConnection.wlan.isconnected():
+        if wifi.wlan and wifi.wlan.isconnected():
             server = await uasyncio.start_server(handle_client, "0.0.0.0", 80)
             print(f"Server started on {Settings.ip}")
             await server.wait_closed()
@@ -99,28 +99,39 @@ async def mqtt_loop():
 async def main():
     dn33c08.update_settings()
 
-    WifiConnection.set_dn33c08(dn33c08)
+    wifi = WifiConnection(dn33c08)
     
-    wifi_task = uasyncio.create_task(WifiConnection.start_and_maintain_connection())
+    wifi_task = uasyncio.create_task(wifi.start_and_maintain_connection())
 
-    while not (WifiConnection.wlan and WifiConnection.wlan.isconnected()):
+    while not (wifi.wlan and wifi.wlan.isconnected()):
         await uasyncio.sleep(1)
-    
+    if Settings.mqtt:   
+        await initialize_mqtt()
+
     io_task = uasyncio.create_task(dn33c08.process_input_queue())
-    server_task = uasyncio.create_task(run_server())
+    server_task = uasyncio.create_task(run_server(wifi))
     
     try:
-        await uasyncio.gather(io_task, wifi_task, server_task)
+        if Settings.mqtt:
+            mqtt_task = uasyncio.create_task(mqtt_loop())
+            await uasyncio.gather(io_task, wifi_task, server_task, mqtt_task)
+        else:
+            await uasyncio.gather(io_task, wifi_task, server_task) # , mqtt_task)
+
     except Exception as e:
         print(f"Error in main loop: {e}")
         import sys
         sys.print_exception(e)
     finally:
-        # Clean up tasks
-        for task in [wifi_task, server_task]:
-            task.cancel()
+        if Settings.mqtt:
+            tasks = [io_task, wifi_task, server_task, mqtt_task]
+        else:
+            tasks = [io_task, wifi_task, server_task]
+            for task in tasks:
+                task.cancel()
         await uasyncio.sleep_ms(100)
 
 if __name__ == "__main__":
     uasyncio.run(main())
+
 
